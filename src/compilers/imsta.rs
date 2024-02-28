@@ -136,7 +136,7 @@ impl ImCompiler {
                         .push(unsafe { transmute(assign as Operation<()>) });
                     let idx = self.constant_get_or_def(name);
                     self.future_tape.push(idx as u64);
-                    let value = self.compile_expr(*value);
+                    self.compile_expr(*value);
                 }
             },
             _ => {}
