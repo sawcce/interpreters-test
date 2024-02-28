@@ -4,6 +4,8 @@ use crate::expr::{Binding, Expr};
 
 #[derive(Debug, Clone, Copy)]
 enum Value {
+    Nil,
+    Boolean(bool),
     Float(f64),
 }
 
@@ -38,6 +40,20 @@ impl Tape {
             self.tape = self.tape.add(1);
             return val;
         };
+    }
+
+    pub unsafe fn get_next_u128(&mut self) -> u128 {
+        if self.offset == self.size {
+            panic!("End of tape reached");
+        }
+
+        self.offset += 2;
+
+        let ptr = self.tape as *const u128;
+        let value = ptr.read();
+
+        self.tape = self.tape.add(2);
+        value
     }
 
     pub fn get_next_float(&mut self) -> f64 {
@@ -82,18 +98,18 @@ impl ImCompiler {
 
         match expr {
             Expr::Float(x) => {
-                fn float(ctx: &mut CallContext) -> u64 {
-                    ctx.tape.get_next()
+                unsafe fn float(ctx: &mut CallContext) -> Value {
+                    Value::Float(transmute(ctx.tape.get_next()))
                 }
 
                 self.future_tape
-                    .push(unsafe { transmute(float as Operation<u64>) });
+                    .push(unsafe { transmute(float as Operation<Value>) });
                 self.future_tape.push(unsafe { transmute(x) });
             }
 
             Expr::Var(binding) => match binding {
                 Binding::Global(name) => {
-                    unsafe fn var(ctx: &mut CallContext) -> u64 {
+                    unsafe fn var(ctx: &mut CallContext) -> u128 {
                         let idx = ctx.tape.get_next();
                         return transmute(ctx.globals[idx as usize].clone());
                     }
@@ -101,7 +117,7 @@ impl ImCompiler {
                     let idx = self.constant_get_or_def(name) as u64;
 
                     self.future_tape
-                        .push(unsafe { transmute(var as Operation<u64>) });
+                        .push(unsafe { transmute(var as Operation<u128>) });
                     self.future_tape.push(idx);
                 }
             },
@@ -111,7 +127,7 @@ impl ImCompiler {
                     unsafe fn assign(ctx: &mut CallContext) {
                         println!("Assign!");
                         let idx = ctx.tape.get_next();
-                        let value = ctx.tape.get_next_func::<u64>();
+                        let value = ctx.tape.get_next_func::<Value>();
 
                         ctx.globals[idx as usize] = transmute(value(ctx));
                     }
@@ -159,6 +175,8 @@ pub fn tape_test() {
 
     let mut compiler = ImCompiler::new();
     compiler.compile_expr(expr);
+
+    println!("Compiler: {compiler:?}");
 
     let mut context = CallContext::new(
         compiler.future_tape.as_ptr(),
