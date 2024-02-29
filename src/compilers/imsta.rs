@@ -1,11 +1,14 @@
-use std::{hint::black_box, mem::transmute, sync::atomic::{AtomicU64, Ordering}};
+use std::{
+    mem::transmute,
+    sync::atomic::{AtomicU64, Ordering},
+};
 
 use crate::expr::{Binding, Expr, Operator};
 
 static X: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
-enum Value {
+pub enum Value {
     Nil,
     Boolean(bool),
     Float(f64),
@@ -26,7 +29,26 @@ impl Value {
 /// actual T type it will cause segmentation faults.
 /// Hence you can't use T=() to mean a generic Operation
 /// and discard the result.
-pub type Operation<T> = unsafe fn(&mut CallContext) -> T;
+pub struct Operation<T = Value>(unsafe fn(&mut CallContext) -> T);
+
+impl<T> Operation<T> {
+    pub unsafe fn call(self, ctx: &mut CallContext) -> T {
+        unsafe { self.0(ctx) }
+    }
+}
+
+impl Operation<Value> {
+    /// A statement that returns a value will divert
+    /// control flow, since we can't return from the
+    /// routine's caller we need to manually check
+    /// if the evaluated expression returns.
+    /// => check if the Operation fn pointer is ret.
+    /// Only blocks (Expr::Block) should contain
+    /// return instructions.
+    pub fn returns(&self) -> bool {
+        self.0 == ret
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct Tape {
@@ -82,9 +104,9 @@ impl Tape {
         unsafe { transmute(self.get_next()) }
     }
 
-    pub fn get_next_func<T>(&mut self) -> unsafe fn(&mut CallContext) -> T {
+    pub fn get_next_func<T>(&mut self) -> Operation<T> {
         let func = unsafe { transmute(self.get_next()) };
-        func
+        Operation(func)
     }
 
     pub fn save(&self) -> (usize, *const u64) {
@@ -100,6 +122,15 @@ impl Tape {
         self.tape = self.tape.add(amount);
         self.offset += amount;
     }
+
+    pub unsafe fn debug(&mut self) {
+        let mut ptr = self.tape.sub(self.offset - 1).clone();
+
+        for i in 0..self.size - 10 {
+            println!("{i}: {}", *ptr);
+            ptr = ptr.add(1);
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -111,17 +142,15 @@ pub struct ImCompiler {
 macro_rules! impl_op {
     ($name:ident, $self:ident, $lhs:ident, $op:tt, $rhs:ident) => {{
         unsafe fn $name(ctx: &mut CallContext) -> Value {
-            let lhs = ctx.tape.get_next_func::<Value>()(ctx);
-            let rhs = ctx.tape.get_next_func::<Value>()(ctx);
+            let lhs = ctx.tape.get_next_func::<Value>().call(ctx);
+            let rhs = ctx.tape.get_next_func::<Value>().call(ctx);
 
             impl_apply_op!(lhs, $op, rhs)
         }
 
-        let test: u64 = unsafe { transmute($name as Operation<Value>) };
-        //println!("Special push {test:?}!");
         $self
             .future_tape
-            .push(unsafe { transmute($name as Operation<Value>) });
+            .push(unsafe { transmute(Operation($name) as Operation<Value>) });
         $self.compile_expr(*$lhs);
         $self.compile_expr(*$rhs);
     }};
@@ -160,6 +189,10 @@ macro_rules! impl_apply_op {
     ($lhs:ident, <=, $rhs:ident) => {impl_apply_cmp!($lhs, <=, $rhs)};
 }
 
+unsafe fn ret(ctx: &mut CallContext) -> Value {
+    ctx.tape.get_next_func::<Value>().call(ctx)
+}
+
 impl ImCompiler {
     pub fn new() -> Self {
         Self {
@@ -193,7 +226,7 @@ impl ImCompiler {
                     Value::Float(transmute(ctx.tape.get_next()))
                 }
 
-                self.push(unsafe { transmute(float as Operation<Value>) });
+                self.push(unsafe { transmute(Operation(float) as Operation<Value>) });
                 self.push(unsafe { transmute(x) });
             }
 
@@ -206,51 +239,83 @@ impl ImCompiler {
 
                     let idx = self.constant_get_or_def(name) as u64;
 
-                    self.push(unsafe { transmute(var as Operation<Value>) });
+                    self.push(unsafe { transmute(Operation(var) as Operation<Value>) });
                     self.push(idx);
                 }
             },
 
             Expr::Assign(binding, value) => match binding {
                 Binding::Global(name) => {
-                    unsafe fn assign(ctx: &mut CallContext) {
+                    unsafe fn assign(ctx: &mut CallContext) -> Value {
                         let idx = ctx.tape.get_next();
                         let value = ctx.tape.get_next_func::<Value>();
 
-                        ctx.globals[idx as usize] = transmute(value(ctx));
+                        ctx.globals[idx as usize] = transmute(value.call(ctx));
+
+                        Value::Nil
                     }
 
-                    self.push(unsafe { transmute(assign as Operation<()>) });
+                    self.push(unsafe { transmute(Operation(assign) as Operation<Value>) });
                     let idx = self.constant_get_or_def(name);
                     self.push(idx as u64);
                     self.compile_expr(*value);
                 }
             },
 
+            Expr::Return(value) => {
+                self.push(unsafe { transmute(Operation(ret) as Operation<Value>) });
+                self.compile_expr(*value);
+            }
+
             Expr::Block(statements) => {
+                unsafe fn block(ctx: &mut CallContext) -> Value {
+                    let length = ctx.tape.get_next() as usize;
+                    let start = ctx.tape.offset;
+
+                    while ctx.tape.offset < start + length {
+                        let func = ctx.tape.get_next_func::<Value>();
+
+                        if func.returns() {
+                            return func.call(ctx);
+                        }
+
+                        func.call(ctx);
+                    }
+
+                    Value::Nil
+                }
+
+                self.push(unsafe { transmute(Operation(block) as Operation<Value>) });
+                let fix_idx = self.future_tape.len();
+                self.push(0);
+
                 for statement in statements {
                     self.compile_expr(statement);
                 }
+
+                self.future_tape[fix_idx] = (self.future_tape.len() - fix_idx) as u64;
             }
 
+            // TODO: Enable a return statement inside while
             Expr::While(cond, body) => {
-                unsafe fn l(ctx: &mut CallContext) -> () {
+                unsafe fn l(ctx: &mut CallContext) -> Value {
                     let size: u64 = ctx.tape.get_next();
                     let tape_ptr = ctx.tape.save();
 
-                    while ctx.tape.get_next_func::<Value>()(ctx).truthy() {
+                    while ctx.tape.get_next_func::<Value>().call(ctx).truthy() {
                         X.fetch_add(1, Ordering::Relaxed);
                         // println!("Test!");
                         // The body of the while loop must not return
                         // any value
-                        ctx.tape.get_next_func::<()>()(ctx);
+                        ctx.tape.get_next_func::<()>().call(ctx);
                         ctx.tape.restore(tape_ptr);
                     }
 
                     ctx.tape.skip(size as usize);
+                    Value::Nil
                 }
 
-                self.push(unsafe { transmute(l as Operation<()>) });
+                self.push(unsafe { transmute(Operation(l) as Operation<Value>) });
                 let size_idx = self.future_tape.len();
                 self.push(0);
 
@@ -296,35 +361,46 @@ impl CallContext {
         }
     }
 
-    pub fn execute(&mut self) {
-        while self.tape.offset < self.tape.size {
+    pub fn execute(&mut self) -> Value {
+        while self.tape.offset < self.tape.size - 1 {
             let val = self.tape.get_next();
-            let func: Operation<()> = unsafe { std::mem::transmute(val) };
-            unsafe { (func)(self) };
+            let func: Operation<Value> = unsafe { std::mem::transmute(val) };
+
+            if func.returns() {
+                return unsafe { func.call(self) };
+            }
+
+            unsafe { func.call(self) };
         }
+
+        Value::Nil
     }
 }
 
 #[test]
 pub fn tape_test() {
-    let expr = Expr::Block(vec![
-        Binding::Global("x".into()).assign(Expr::Float(100_000_000.0)),
-        Expr::While(
-            Expr::BinaryOp(
-                Expr::Var(Binding::Global("x".into())).into(),
-                Operator::Gt,
-                Expr::Float(0.0).into(),
-            )
-            .into(),
-            Binding::Global("x".into()).assign(
+    let expr = Expr::Return(
+        Expr::Block(vec![
+            Expr::Return(Expr::Float(0.0).into()),
+            Binding::Global("x".into()).assign(Expr::Float(100_000_000.0)),
+            Expr::While(
                 Expr::BinaryOp(
                     Expr::Var(Binding::Global("x".into())).into(),
-                    Operator::Sub,
-                    Expr::Float(1.0).into(),
-                ),
-            ).into(),
-        ),
-    ]);
+                    Operator::Gt,
+                    Expr::Float(0.0).into(),
+                )
+                .into(),
+                Binding::Global("x".into())
+                    .assign(Expr::BinaryOp(
+                        Expr::Var(Binding::Global("x".into())).into(),
+                        Operator::Sub,
+                        Expr::Float(1.0).into(),
+                    ))
+                    .into(),
+            ),
+        ])
+        .into(),
+    );
 
     let mut compiler = ImCompiler::new();
     compiler.compile_expr(expr);
@@ -336,7 +412,7 @@ pub fn tape_test() {
         compiler.future_tape.len(),
         compiler.globals.len(),
     );
-    black_box(context.execute());
+    context.execute();
 
     let x = X.load(Ordering::Relaxed);
     println!("X: {x}");
