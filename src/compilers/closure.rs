@@ -33,8 +33,6 @@ impl ClosureCompiler {
             };
 
             closure(&mut ctx);
-
-            println!("Ctx: {:?}", ctx);
         })
     }
 

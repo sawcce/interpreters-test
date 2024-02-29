@@ -1,6 +1,8 @@
 pub mod expr;
 pub mod compilers;
 
+pub use compilers::*;
+
 #[cfg(test)]
 mod tests {
     use super::expr::*;

@@ -1,14 +1,31 @@
-use std::mem::transmute;
+use std::{hint::black_box, mem::transmute, sync::atomic::{AtomicU64, Ordering}};
 
-use crate::expr::{Binding, Expr};
+use crate::expr::{Binding, Expr, Operator};
 
-#[derive(Debug, Clone, Copy)]
+static X: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
 enum Value {
     Nil,
     Boolean(bool),
     Float(f64),
 }
 
+impl Value {
+    pub fn truthy(&self) -> bool {
+        match self {
+            Value::Nil => false,
+            Value::Boolean(b) => *b,
+            Value::Float(f) => *f == 1.0,
+        }
+    }
+}
+
+/// WARNING! You have to be extremely careful when calling
+/// transmute on Operation, if T doesn't correspond to the
+/// actual T type it will cause segmentation faults.
+/// Hence you can't use T=() to mean a generic Operation
+/// and discard the result.
 pub type Operation<T> = unsafe fn(&mut CallContext) -> T;
 
 #[derive(Debug, Clone)]
@@ -28,7 +45,8 @@ impl Tape {
     }
 
     pub fn get_next(&mut self) -> u64 {
-        if self.offset == self.size {
+        //println!("Getting next {:?}!", self);
+        if self.offset >= self.size {
             panic!("End of tape reached");
         }
 
@@ -42,15 +60,19 @@ impl Tape {
         };
     }
 
+    pub unsafe fn peek(&mut self) -> u64 {
+        self.tape.add(1).read()
+    }
+
     pub unsafe fn get_next_u128(&mut self) -> u128 {
-        if self.offset == self.size {
+        if self.offset >= self.size {
             panic!("End of tape reached");
         }
 
         self.offset += 2;
 
         let ptr = self.tape as *const u128;
-        let value = ptr.read();
+        let value = ptr.clone().read();
 
         self.tape = self.tape.add(2);
         value
@@ -64,12 +86,78 @@ impl Tape {
         let func = unsafe { transmute(self.get_next()) };
         func
     }
+
+    pub fn save(&self) -> (usize, *const u64) {
+        (self.offset, self.tape)
+    }
+
+    pub unsafe fn restore(&mut self, (offset, old): (usize, *const u64)) {
+        self.tape = old;
+        self.offset = offset;
+    }
+
+    pub unsafe fn skip(&mut self, amount: usize) {
+        self.tape = self.tape.add(amount);
+        self.offset += amount;
+    }
 }
 
 #[derive(Debug, Clone)]
 pub struct ImCompiler {
-    globals: Vec<String>,
-    future_tape: Vec<u64>,
+    pub globals: Vec<String>,
+    pub future_tape: Vec<u64>,
+}
+
+macro_rules! impl_op {
+    ($name:ident, $self:ident, $lhs:ident, $op:tt, $rhs:ident) => {{
+        unsafe fn $name(ctx: &mut CallContext) -> Value {
+            let lhs = ctx.tape.get_next_func::<Value>()(ctx);
+            let rhs = ctx.tape.get_next_func::<Value>()(ctx);
+
+            impl_apply_op!(lhs, $op, rhs)
+        }
+
+        let test: u64 = unsafe { transmute($name as Operation<Value>) };
+        //println!("Special push {test:?}!");
+        $self
+            .future_tape
+            .push(unsafe { transmute($name as Operation<Value>) });
+        $self.compile_expr(*$lhs);
+        $self.compile_expr(*$rhs);
+    }};
+}
+
+macro_rules! impl_apply_arithmetic {
+    ($lhs:ident, $op:tt, $rhs:ident) => {{
+        if let Value::Float(f_1) = $lhs {
+            if let Value::Float(f_2) = $rhs {
+                //println!("Test: {f_1} - {f_2}");
+                return Value::Float(f_1 $op f_2);
+            }
+        }
+
+        panic!("Invalid arguments!");
+    }};
+}
+
+macro_rules! impl_apply_cmp {
+    ($lhs:ident, $op:tt, $rhs:ident) => {
+       Value::Boolean($lhs $op $rhs)
+    };
+}
+
+macro_rules! impl_apply_op {
+    ($lhs:ident, +, $rhs:ident) => {impl_apply_arithmetic!($lhs, +, $rhs)};
+    ($lhs:ident, -, $rhs:ident) => {impl_apply_arithmetic!($lhs, -, $rhs)};
+    ($lhs:ident, *, $rhs:ident) => {impl_apply_arithmetic!($lhs, *, $rhs)};
+    ($lhs:ident, /, $rhs:ident) => {impl_apply_arithmetic!($lhs, /, $rhs)};
+    ($lhs:ident, %, $rhs:ident) => {impl_apply_arithmetic!($lhs, +, $rhs)};
+    ($lhs:ident, ==, $rhs:ident) => {impl_apply_cmp!($lhs, ==, $rhs)};
+    ($lhs:ident, !=, $rhs:ident) => {impl_apply_cmp!($lhs, !=, $rhs)};
+    ($lhs:ident, >, $rhs:ident) => {impl_apply_cmp!($lhs, >, $rhs)};
+    ($lhs:ident, >=, $rhs:ident) => {impl_apply_cmp!($lhs, >=, $rhs)};
+    ($lhs:ident, <, $rhs:ident) => {impl_apply_cmp!($lhs, <, $rhs)};
+    ($lhs:ident, <=, $rhs:ident) => {impl_apply_cmp!($lhs, <=, $rhs)};
 }
 
 impl ImCompiler {
@@ -78,6 +166,10 @@ impl ImCompiler {
             globals: Vec::new(),
             future_tape: Vec::new(),
         }
+    }
+
+    pub fn push(&mut self, value: u64) {
+        self.future_tape.push(value);
     }
 
     pub fn constant_get_or_def(&mut self, name: impl ToString) -> usize {
@@ -94,51 +186,95 @@ impl ImCompiler {
     }
 
     pub fn compile_expr(&mut self, expr: Expr) {
-        println!("Expr: {expr:?}");
-
         match expr {
             Expr::Float(x) => {
                 unsafe fn float(ctx: &mut CallContext) -> Value {
+                    //println!("float => _____");
                     Value::Float(transmute(ctx.tape.get_next()))
                 }
 
-                self.future_tape
-                    .push(unsafe { transmute(float as Operation<Value>) });
-                self.future_tape.push(unsafe { transmute(x) });
+                self.push(unsafe { transmute(float as Operation<Value>) });
+                self.push(unsafe { transmute(x) });
             }
 
             Expr::Var(binding) => match binding {
                 Binding::Global(name) => {
-                    unsafe fn var(ctx: &mut CallContext) -> u128 {
+                    unsafe fn var(ctx: &mut CallContext) -> Value {
                         let idx = ctx.tape.get_next();
-                        return transmute(ctx.globals[idx as usize].clone());
+                        return ctx.globals[idx as usize].clone();
                     }
 
                     let idx = self.constant_get_or_def(name) as u64;
 
-                    self.future_tape
-                        .push(unsafe { transmute(var as Operation<u128>) });
-                    self.future_tape.push(idx);
+                    self.push(unsafe { transmute(var as Operation<Value>) });
+                    self.push(idx);
                 }
             },
 
             Expr::Assign(binding, value) => match binding {
                 Binding::Global(name) => {
                     unsafe fn assign(ctx: &mut CallContext) {
-                        println!("Assign!");
                         let idx = ctx.tape.get_next();
                         let value = ctx.tape.get_next_func::<Value>();
 
                         ctx.globals[idx as usize] = transmute(value(ctx));
                     }
 
-                    self.future_tape
-                        .push(unsafe { transmute(assign as Operation<()>) });
+                    self.push(unsafe { transmute(assign as Operation<()>) });
                     let idx = self.constant_get_or_def(name);
-                    self.future_tape.push(idx as u64);
+                    self.push(idx as u64);
                     self.compile_expr(*value);
                 }
             },
+
+            Expr::Block(statements) => {
+                for statement in statements {
+                    self.compile_expr(statement);
+                }
+            }
+
+            Expr::While(cond, body) => {
+                unsafe fn l(ctx: &mut CallContext) -> () {
+                    let size: u64 = ctx.tape.get_next();
+                    let tape_ptr = ctx.tape.save();
+
+                    while ctx.tape.get_next_func::<Value>()(ctx).truthy() {
+                        X.fetch_add(1, Ordering::Relaxed);
+                        // println!("Test!");
+                        // The body of the while loop must not return
+                        // any value
+                        ctx.tape.get_next_func::<()>()(ctx);
+                        ctx.tape.restore(tape_ptr);
+                    }
+
+                    ctx.tape.skip(size as usize);
+                }
+
+                self.push(unsafe { transmute(l as Operation<()>) });
+                let size_idx = self.future_tape.len();
+                self.push(0);
+
+                self.compile_expr(*cond);
+                let body_idx = self.future_tape.len();
+                self.compile_expr(*body);
+
+                self.future_tape[size_idx] = (self.future_tape.len() - body_idx) as u64;
+            }
+
+            Expr::BinaryOp(lhs, op, rhs) => match op {
+                Operator::Add => impl_op!(add, self, lhs, +, rhs),
+                Operator::Sub => impl_op!(sub, self, lhs, -, rhs),
+                Operator::Mul => impl_op!(mul, self, lhs, *, rhs),
+                Operator::Div => impl_op!(div, self, lhs, /, rhs),
+                Operator::Rem => impl_op!(rem, self, lhs, %, rhs),
+                Operator::Eq => impl_op!(eq, self, lhs, ==, rhs),
+                Operator::Neq => impl_op!(neq, self, lhs, !=, rhs),
+                Operator::Gt => impl_op!(gt, self, lhs, >, rhs),
+                Operator::Gte => impl_op!(gte, self, lhs, >=, rhs),
+                Operator::Lt => impl_op!(lt, self, lhs, <=, rhs),
+                Operator::Lte => impl_op!(lte, self, lhs, <, rhs),
+            },
+
             _ => {}
         }
     }
@@ -171,7 +307,24 @@ impl CallContext {
 
 #[test]
 pub fn tape_test() {
-    let expr = Binding::Global("x".into()).assign(Expr::Float(100.0));
+    let expr = Expr::Block(vec![
+        Binding::Global("x".into()).assign(Expr::Float(100_000_000.0)),
+        Expr::While(
+            Expr::BinaryOp(
+                Expr::Var(Binding::Global("x".into())).into(),
+                Operator::Gt,
+                Expr::Float(0.0).into(),
+            )
+            .into(),
+            Binding::Global("x".into()).assign(
+                Expr::BinaryOp(
+                    Expr::Var(Binding::Global("x".into())).into(),
+                    Operator::Sub,
+                    Expr::Float(1.0).into(),
+                ),
+            ).into(),
+        ),
+    ]);
 
     let mut compiler = ImCompiler::new();
     compiler.compile_expr(expr);
@@ -183,7 +336,10 @@ pub fn tape_test() {
         compiler.future_tape.len(),
         compiler.globals.len(),
     );
-    context.execute();
+    black_box(context.execute());
 
-    println!("Context: {:?}", context);
+    let x = X.load(Ordering::Relaxed);
+    println!("X: {x}");
+
+    //println!("Context: {:?}", context);
 }
