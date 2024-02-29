@@ -14,6 +14,12 @@ pub enum Value {
     Float(f64),
 }
 
+#[derive(Debug, Clone, Copy)]
+enum Hint {
+    Break = 1002,
+    Return = 1001,
+}
+
 impl Value {
     pub fn truthy(&self) -> bool {
         match self {
@@ -32,6 +38,7 @@ impl Value {
 pub struct Operation<T = Value>(unsafe fn(&mut CallContext) -> T);
 
 impl<T> Operation<T> {
+    #[inline]
     pub unsafe fn call(self, ctx: &mut CallContext) -> T {
         unsafe { self.0(ctx) }
     }
@@ -84,6 +91,10 @@ impl Tape {
 
     pub unsafe fn peek(&mut self) -> u64 {
         self.tape.add(1).read()
+    }
+
+    pub unsafe fn read(&self) -> u64 {
+        self.tape.read()
     }
 
     pub unsafe fn get_next_u128(&mut self) -> u128 {
@@ -263,22 +274,25 @@ impl ImCompiler {
             },
 
             Expr::Return(value) => {
-                self.push(unsafe { transmute(Operation(ret) as Operation<Value>) });
+                self.push(Hint::Return as u64);
                 self.compile_expr(*value);
             }
 
             Expr::Block(statements) => {
                 unsafe fn block(ctx: &mut CallContext) -> Value {
                     let length = ctx.tape.get_next() as usize;
+                    println!("Block length {:?} {:?}", length, ctx.tape);
                     let start = ctx.tape.offset;
 
                     while ctx.tape.offset < start + length {
-                        let func = ctx.tape.get_next_func::<Value>();
-
-                        if func.returns() {
-                            return func.call(ctx);
+                        if ctx.tape.read() == Hint::Return as u64 {
+                            ctx.tape.skip(1);
+                            let value = ctx.tape.get_next_func::<Value>().call(ctx);
+                            ctx.tape.skip(length - 1);
+                            return value;
                         }
 
+                        let func = ctx.tape.get_next_func::<Value>();
                         func.call(ctx);
                     }
 
@@ -290,6 +304,7 @@ impl ImCompiler {
                 self.push(0);
 
                 for statement in statements {
+                    // Be sure to handle Return statements
                     self.compile_expr(statement);
                 }
 
@@ -362,45 +377,31 @@ impl CallContext {
     }
 
     pub fn execute(&mut self) -> Value {
-        while self.tape.offset < self.tape.size - 1 {
-            let val = self.tape.get_next();
-            let func: Operation<Value> = unsafe { std::mem::transmute(val) };
-
-            if func.returns() {
-                return unsafe { func.call(self) };
-            }
-
-            unsafe { func.call(self) };
-        }
-
-        Value::Nil
+        unsafe { self.tape.get_next_func::<Value>().call(self) }
     }
 }
 
 #[test]
 pub fn tape_test() {
-    let expr = Expr::Return(
-        Expr::Block(vec![
-            Expr::Return(Expr::Float(0.0).into()),
-            Binding::Global("x".into()).assign(Expr::Float(100_000_000.0)),
-            Expr::While(
-                Expr::BinaryOp(
+    let expr = Expr::Block(vec![
+        Expr::Return(Expr::Float(0.0).into()),
+        Binding::Global("x".into()).assign(Expr::Float(100_000_000.0)),
+        Expr::While(
+            Expr::BinaryOp(
+                Expr::Var(Binding::Global("x".into())).into(),
+                Operator::Gt,
+                Expr::Float(0.0).into(),
+            )
+            .into(),
+            Binding::Global("x".into())
+                .assign(Expr::BinaryOp(
                     Expr::Var(Binding::Global("x".into())).into(),
-                    Operator::Gt,
-                    Expr::Float(0.0).into(),
-                )
+                    Operator::Sub,
+                    Expr::Float(1.0).into(),
+                ))
                 .into(),
-                Binding::Global("x".into())
-                    .assign(Expr::BinaryOp(
-                        Expr::Var(Binding::Global("x".into())).into(),
-                        Operator::Sub,
-                        Expr::Float(1.0).into(),
-                    ))
-                    .into(),
-            ),
-        ])
-        .into(),
-    );
+        ),
+    ]);
 
     let mut compiler = ImCompiler::new();
     compiler.compile_expr(expr);
