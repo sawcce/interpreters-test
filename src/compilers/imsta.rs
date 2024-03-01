@@ -16,8 +16,9 @@ pub enum Value {
 
 #[derive(Debug, Clone, Copy)]
 enum Hint {
-    Break = 1002,
     Return = 1001,
+    Break = 1002,
+    While = 1003,
 }
 
 impl Value {
@@ -76,7 +77,11 @@ impl Tape {
     pub fn get_next(&mut self) -> u64 {
         //println!("Getting next {:?}!", self);
         if self.offset >= self.size {
-            panic!("End of tape reached");
+            panic!(
+                "End of tape reached: max offset is: {}, tried to access: {}",
+                self.size - 1,
+                self.offset + 1
+            );
         }
 
         self.offset += 1;
@@ -204,6 +209,33 @@ unsafe fn ret(ctx: &mut CallContext) -> Value {
     ctx.tape.get_next_func::<Value>().call(ctx)
 }
 
+macro_rules! loop_body {
+    ($ctx:ident, $length:ident) => {
+        if 1001 <= $ctx.tape.read() && $ctx.tape.read() <= 2000 as u64 {
+            let v = $ctx.tape.read();
+            $ctx.tape.skip(1);
+            println!("Test: {v}");
+            match v {
+                1001 => {
+                    let value = $ctx.tape.get_next_func::<Value>().call($ctx);
+                    $ctx.tape.skip($length as usize - 1);
+                    return value.into();
+                }
+                1003 => {
+                    let value = $ctx.tape.get_next_func::<Option<Value>>().call($ctx);
+                    println!("Value: {value:?}");
+                    if let Some(x) = value {
+                        $ctx.tape.skip($length as usize - 1);
+                        return x.into();
+                    }
+                    continue;
+                }
+                x => panic!("Invalid block hint: {x}"),
+            }
+        }
+    };
+}
+
 impl ImCompiler {
     pub fn new() -> Self {
         Self {
@@ -281,16 +313,16 @@ impl ImCompiler {
             Expr::Block(statements) => {
                 unsafe fn block(ctx: &mut CallContext) -> Value {
                     let length = ctx.tape.get_next() as usize;
-                    println!("Block length {:?} {:?}", length, ctx.tape);
                     let start = ctx.tape.offset;
+                    println!(
+                        "Block length {:?} {:?} => {}",
+                        length,
+                        ctx.tape,
+                        start + length
+                    );
 
-                    while ctx.tape.offset < start + length {
-                        if ctx.tape.read() == Hint::Return as u64 {
-                            ctx.tape.skip(1);
-                            let value = ctx.tape.get_next_func::<Value>().call(ctx);
-                            ctx.tape.skip(length - 1);
-                            return value;
-                        }
+                    while ctx.tape.offset < start + length - 1 {
+                        loop_body!(ctx, length);
 
                         let func = ctx.tape.get_next_func::<Value>();
                         func.call(ctx);
@@ -313,24 +345,32 @@ impl ImCompiler {
 
             // TODO: Enable a return statement inside while
             Expr::While(cond, body) => {
-                unsafe fn l(ctx: &mut CallContext) -> Value {
+                unsafe fn l(ctx: &mut CallContext) -> Option<Value> {
+                    println!("While");
                     let size: u64 = ctx.tape.get_next();
                     let tape_ptr = ctx.tape.save();
 
+                    let pk = ctx.tape.peek();
+                    println!("Peek {pk}");
                     while ctx.tape.get_next_func::<Value>().call(ctx).truthy() {
+                        loop_body!(ctx, size);
+                        // println!("Condition true {}", X.load(Ordering::Relaxed));
                         X.fetch_add(1, Ordering::Relaxed);
+
                         // println!("Test!");
                         // The body of the while loop must not return
                         // any value
-                        ctx.tape.get_next_func::<()>().call(ctx);
+                        ctx.tape.get_next_func::<Value>().call(ctx);
                         ctx.tape.restore(tape_ptr);
                     }
 
                     ctx.tape.skip(size as usize);
-                    Value::Nil
+
+                    None
                 }
 
-                self.push(unsafe { transmute(Operation(l) as Operation<Value>) });
+                self.push(Hint::While as u64);
+                self.push(unsafe { transmute(Operation(l) as Operation<Option<Value>>) });
                 let size_idx = self.future_tape.len();
                 self.push(0);
 
@@ -384,7 +424,7 @@ impl CallContext {
 #[test]
 pub fn tape_test() {
     let expr = Expr::Block(vec![
-        Expr::Return(Expr::Float(0.0).into()),
+        // Expr::Return(Expr::Float(0.0).into()),
         Binding::Global("x".into()).assign(Expr::Float(100_000_000.0)),
         Expr::While(
             Expr::BinaryOp(
@@ -401,6 +441,7 @@ pub fn tape_test() {
                 ))
                 .into(),
         ),
+        Expr::Return(Binding::Global("x".into()).var().into()),
     ]);
 
     let mut compiler = ImCompiler::new();

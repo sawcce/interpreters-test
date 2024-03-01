@@ -35,6 +35,10 @@ impl Binding {
     pub fn assign(self, value: impl Into<Box<Expr>>) -> Expr {
         Expr::Assign(self, value.into())
     }
+
+    pub fn var(self) -> Expr {
+        Expr::Var(self)
+    }
 }
 
 impl Expr {
