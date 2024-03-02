@@ -86,6 +86,20 @@ pub mod flow {
 pub mod operations {
     use crate::*;
 
+    pub unsafe fn var(ctx: &mut CallContext) -> Value {
+        let idx = ctx.tape.get_next();
+        return ctx.globals[idx as usize].clone();
+    }
+
+    pub unsafe fn assign(ctx: &mut CallContext) -> Value {
+        let idx = ctx.tape.get_next();
+        let value = ctx.tape.get_next_func::<Value>();
+
+        ctx.globals[idx as usize] = transmute(value.call(ctx));
+
+        Value::Nil
+    }
+
     macro_rules! impl_op {
         ($name:ident, $op:tt) => {
             pub unsafe fn $name(ctx: &mut CallContext) -> Value {

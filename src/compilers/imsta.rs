@@ -1,9 +1,7 @@
 use std::mem::transmute;
 
 use crate::expr::{Binding, Expr, Operator};
-use crate::implementations::*;
-
-use self::operations::native_op_neq;
+use crate::*;
 
 #[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
 pub enum Value {
@@ -186,30 +184,16 @@ impl ImCompiler {
 
             Expr::Var(binding) => match binding {
                 Binding::Global(name) => {
-                    unsafe fn var(ctx: &mut CallContext) -> Value {
-                        let idx = ctx.tape.get_next();
-                        return ctx.globals[idx as usize].clone();
-                    }
-
                     let idx = self.constant_get_or_def(name) as u64;
 
-                    self.push(unsafe { transmute(Operation(var) as Operation<Value>) });
+                    self.push(unsafe { transmute(Operation(operations::var) as Operation<Value>) });
                     self.push(idx);
                 }
             },
 
             Expr::Assign(binding, value) => match binding {
                 Binding::Global(name) => {
-                    unsafe fn assign(ctx: &mut CallContext) -> Value {
-                        let idx = ctx.tape.get_next();
-                        let value = ctx.tape.get_next_func::<Value>();
-
-                        ctx.globals[idx as usize] = transmute(value.call(ctx));
-
-                        Value::Nil
-                    }
-
-                    self.push(unsafe { transmute(Operation(assign) as Operation<Value>) });
+                    self.push(unsafe { transmute(Operation(operations::assign) as Operation<Value>) });
                     let idx = self.constant_get_or_def(name);
                     self.push(idx as u64);
                     self.compile_expr(*value);
@@ -299,7 +283,7 @@ impl ImCompiler {
 pub struct CallContext {
     pub tape: Tape,
     stack: Vec<Value>,
-    globals: Vec<Value>,
+    pub globals: Vec<Value>,
 }
 
 impl CallContext {
@@ -373,6 +357,8 @@ pub fn tape_test() {
 
     let mut compiler = ImCompiler::new();
     compiler.compile_expr(expr);
+
+    Dissassembler::new(compiler.future_tape.clone()).dissassemble();
 
     // println!("Compiler: {compiler:?}");
 
