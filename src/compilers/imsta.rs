@@ -129,10 +129,16 @@ impl Tape {
     }
 
     pub unsafe fn debug(&mut self) {
-        let mut ptr = self.tape.sub(self.offset - 1).clone();
+        println!("Tape: {:?}", self.tape);
+        let mut ptr = self.tape.sub(self.offset).clone();
 
-        for i in 0..self.size - 10 {
-            println!("{i}: {}", *ptr);
+        for i in 0..self.size {
+            if i == self.offset {
+                println!("> {i}: {}", *ptr);
+            } else {
+                println!("  {i}: {}", *ptr);
+            }
+
             ptr = ptr.add(1);
         }
     }
