@@ -8,8 +8,14 @@ edition = "2021"
 [dependencies]
 
 [dev-dependencies]
-criterion = "0.5.1"
+criterion = {version = "0.5.1", features = ["html_reports"]}
 
 [[bench]]
 name = "counting"
 harness = false
+
+[profile.test]
+opt-level = 1
+
+[profile.bench]
+opt-level = 3
