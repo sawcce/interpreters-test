@@ -14,6 +14,7 @@ pub enum Expr {
     While(Box<Expr>, Box<Expr>),
     BinaryOp(Box<Expr>, Operator, Box<Expr>),
     Return(Box<Expr>),
+    // TODO: Make else body optional
     Conditional(Box<(Expr, Expr)>, Vec<(Expr, Expr)>, Box<Expr>),
 }
 
