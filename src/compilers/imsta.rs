@@ -321,6 +321,8 @@ pub fn nested() {
     let mut compiler = ImCompiler::new();
     compiler.compile_expr(prog);
 
+    Dissassembler::from(compiler.clone()).dissassemble_program();
+
     println!("Compiler: {compiler:?}");
 
     let mut context = CallContext::new(

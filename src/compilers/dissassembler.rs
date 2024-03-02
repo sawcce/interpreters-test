@@ -4,12 +4,14 @@ pub struct Dissassembler {
     offset: u64,
     tape: Vec<u64>,
     globals: Vec<String>,
+    level: usize,
 }
 
 impl From<ImCompiler> for Dissassembler {
     fn from(value: ImCompiler) -> Self {
         Self {
             offset: 0,
+            level: 0,
             tape: value.future_tape,
             globals: value.globals,
         }
@@ -39,6 +41,14 @@ impl Dissassembler {
         self.tape[self.offset as usize + 1]
     }
 
+    fn scope_in(&mut self) {
+        self.level += 4;
+    }
+
+    fn scope_out(&mut self) {
+        self.level -= 4;
+    }
+
     pub fn dissassemble_program(&mut self) {
         self.dissassemble();
         eprintln!("");
@@ -61,6 +71,10 @@ impl Dissassembler {
             let value: f64 = unsafe { transmute(value) };
 
             eprint!("{}f64", value);
+        } else if as_fn == literals::tr {
+            eprint!("true");
+        } else if as_fn == literals::fl {
+            eprint!("false");
         } else {
             return false;
         }
@@ -72,7 +86,7 @@ impl Dissassembler {
         let as_fn: unsafe fn(&mut CallContext) -> Value = unsafe { transmute(element) };
 
         if as_fn == operations::assign {
-            eprint!("global ");
+            eprint!("{:>ident$}global ", "", ident = self.level);
 
             let idx = self.read() as usize;
             eprint!("{}", self.globals[idx]);
@@ -83,19 +97,19 @@ impl Dissassembler {
             let idx = self.read() as usize;
             eprint!("{}", self.globals[idx]);
             return true;
-        } 
-        
-        impl_op_diss!(self, as_fn, operations::native_op_add, +); 
-        impl_op_diss!(self, as_fn, operations::native_op_sub, -); 
-        impl_op_diss!(self, as_fn, operations::native_op_mul, *); 
-        impl_op_diss!(self, as_fn, operations::native_op_div, /); 
-        impl_op_diss!(self, as_fn, operations::native_op_rem, %); 
-        impl_op_diss!(self, as_fn, operations::native_op_eq, ==); 
-        impl_op_diss!(self, as_fn, operations::native_op_eq, !=); 
-        impl_op_diss!(self, as_fn, operations::native_op_gt, >); 
-        impl_op_diss!(self, as_fn, operations::native_op_gte, >=); 
-        impl_op_diss!(self, as_fn, operations::native_op_lt, <); 
-        impl_op_diss!(self, as_fn, operations::native_op_lte, <=); 
+        }
+
+        impl_op_diss!(self, as_fn, operations::native_op_add, +);
+        impl_op_diss!(self, as_fn, operations::native_op_sub, -);
+        impl_op_diss!(self, as_fn, operations::native_op_mul, *);
+        impl_op_diss!(self, as_fn, operations::native_op_div, /);
+        impl_op_diss!(self, as_fn, operations::native_op_rem, %);
+        impl_op_diss!(self, as_fn, operations::native_op_eq, ==);
+        impl_op_diss!(self, as_fn, operations::native_op_eq, !=);
+        impl_op_diss!(self, as_fn, operations::native_op_gt, >);
+        impl_op_diss!(self, as_fn, operations::native_op_gte, >=);
+        impl_op_diss!(self, as_fn, operations::native_op_lt, <);
+        impl_op_diss!(self, as_fn, operations::native_op_lte, <=);
 
         true
     }
@@ -105,24 +119,34 @@ impl Dissassembler {
         let as_opt_fn: unsafe fn(&mut CallContext) -> Option<Value> = unsafe { transmute(element) };
 
         if as_fn == flow::block {
-            eprint!("{{");
-            eprint!("}}");
-        } else if as_fn == flow::block_checked {
-            eprint!("{{\n");
+            eprint!("\n{:>ident$}{{\n", "", ident = self.level);
+            self.scope_in();
+
             let next_instr_idx = self.read();
 
             while self.offset != next_instr_idx {
-                let pk = self.peek();
+                self.dissassemble();
+                eprint!("\n");
+            }
+
+            self.scope_out();
+            eprint!("{:>ident$}}}", "", ident = self.level);
+        } else if as_fn == flow::block_checked {
+            eprint!("\n{:>ident$}{{\n", "", ident = self.level);
+            self.scope_in();
+
+            let next_instr_idx = self.read();
+
+            while self.offset != next_instr_idx {
+                let pk = self.read();
 
                 match pk {
                     1001 => {
-                        eprint!("return ");
-                        self.offset += 1;
+                        eprint!("{:>ident$}return ", "", ident = self.level);
                         self.dissassemble();
                     }
 
                     1003 => {
-                        self.offset += 1;
                         self.dissassemble();
                     }
 
@@ -133,14 +157,36 @@ impl Dissassembler {
 
                 eprint!("\n");
             }
-            eprint!("}}");
+
+            self.scope_out();
+            eprint!("{:>ident$}}}", "", ident = self.level);
         } else if as_opt_fn == flow::while_loop {
-            eprint!("while ");
+            eprint!("{:>ident$}while ", "", ident = self.level);
             let _ = self.read();
             self.dissassemble();
             eprint!(" {{\n");
-            self.dissassemble();
-            eprint!("\n}}");
+
+            self.scope_in();
+
+            let pk = self.read();
+            match pk {
+                1001 => {
+                    eprint!("{:>ident$}return ", "", ident = self.level);
+                    self.dissassemble();
+                }
+
+                1003 => {
+                    self.dissassemble();
+                }
+
+                _ => {
+                    self.dissassemble();
+                }
+            }
+
+            self.scope_out();
+
+            eprint!("\n{:>ident$}}}", "", ident = self.level);
         } else {
             return false;
         }
