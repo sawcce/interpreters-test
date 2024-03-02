@@ -18,6 +18,7 @@ pub mod literals {
 pub mod flow {
     use crate::*;
 
+    // TODO: Handle conditionals
     macro_rules! loop_body {
         ($ctx:ident, $next_instr:ident) => {
             if 1001 <= $ctx.tape.read() && $ctx.tape.read() <= 2000 as u64 {
