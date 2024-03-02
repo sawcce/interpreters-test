@@ -1,11 +1,9 @@
-use std::{
-    mem::transmute,
-    sync::atomic::{AtomicU64, Ordering},
-};
+use std::mem::transmute;
 
 use crate::expr::{Binding, Expr, Operator};
+use crate::implementations::*;
 
-static X: AtomicU64 = AtomicU64::new(0);
+use self::operations::native_op_neq;
 
 #[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
 pub enum Value {
@@ -45,24 +43,11 @@ impl<T> Operation<T> {
     }
 }
 
-impl Operation<Value> {
-    /// A statement that returns a value will divert
-    /// control flow, since we can't return from the
-    /// routine's caller we need to manually check
-    /// if the evaluated expression returns.
-    /// => check if the Operation fn pointer is ret.
-    /// Only blocks (Expr::Block) should contain
-    /// return instructions.
-    pub fn returns(&self) -> bool {
-        self.0 == ret
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct Tape {
     tape: *const u64,
     size: usize,
-    offset: usize,
+    pub offset: usize,
 }
 
 impl Tape {
@@ -160,86 +145,6 @@ pub struct ImCompiler {
     pub future_tape: Vec<u64>,
 }
 
-macro_rules! impl_op {
-    ($name:ident, $self:ident, $lhs:ident, $op:tt, $rhs:ident) => {{
-        unsafe fn $name(ctx: &mut CallContext) -> Value {
-            let lhs = ctx.tape.get_next_func::<Value>().call(ctx);
-            let rhs = ctx.tape.get_next_func::<Value>().call(ctx);
-
-            impl_apply_op!(lhs, $op, rhs)
-        }
-
-        $self
-            .future_tape
-            .push(unsafe { transmute(Operation($name) as Operation<Value>) });
-        $self.compile_expr(*$lhs);
-        $self.compile_expr(*$rhs);
-    }};
-}
-
-macro_rules! impl_apply_arithmetic {
-    ($lhs:ident, $op:tt, $rhs:ident) => {{
-        if let Value::Float(f_1) = $lhs {
-            if let Value::Float(f_2) = $rhs {
-                //println!("Test: {f_1} - {f_2}");
-                return Value::Float(f_1 $op f_2);
-            }
-        }
-
-        panic!("Invalid arguments!");
-    }};
-}
-
-macro_rules! impl_apply_cmp {
-    ($lhs:ident, $op:tt, $rhs:ident) => {
-       Value::Boolean($lhs $op $rhs)
-    };
-}
-
-macro_rules! impl_apply_op {
-    ($lhs:ident, +, $rhs:ident) => {impl_apply_arithmetic!($lhs, +, $rhs)};
-    ($lhs:ident, -, $rhs:ident) => {impl_apply_arithmetic!($lhs, -, $rhs)};
-    ($lhs:ident, *, $rhs:ident) => {impl_apply_arithmetic!($lhs, *, $rhs)};
-    ($lhs:ident, /, $rhs:ident) => {impl_apply_arithmetic!($lhs, /, $rhs)};
-    ($lhs:ident, %, $rhs:ident) => {impl_apply_arithmetic!($lhs, +, $rhs)};
-    ($lhs:ident, ==, $rhs:ident) => {impl_apply_cmp!($lhs, ==, $rhs)};
-    ($lhs:ident, !=, $rhs:ident) => {impl_apply_cmp!($lhs, !=, $rhs)};
-    ($lhs:ident, >, $rhs:ident) => {impl_apply_cmp!($lhs, >, $rhs)};
-    ($lhs:ident, >=, $rhs:ident) => {impl_apply_cmp!($lhs, >=, $rhs)};
-    ($lhs:ident, <, $rhs:ident) => {impl_apply_cmp!($lhs, <, $rhs)};
-    ($lhs:ident, <=, $rhs:ident) => {impl_apply_cmp!($lhs, <=, $rhs)};
-}
-
-unsafe fn ret(ctx: &mut CallContext) -> Value {
-    ctx.tape.get_next_func::<Value>().call(ctx)
-}
-
-macro_rules! loop_body {
-    ($ctx:ident, $next_instr:ident) => {
-        if 1001 <= $ctx.tape.read() && $ctx.tape.read() <= 2000 as u64 {
-            let v = $ctx.tape.read();
-            $ctx.tape.skip(1);
-
-            match v {
-                1001 => {
-                    let value = $ctx.tape.get_next_func::<Value>().call($ctx);
-                    $ctx.tape.move_to($next_instr as usize);
-                    return value.into();
-                }
-                1003 => {
-                    let value = $ctx.tape.get_next_func::<Option<Value>>().call($ctx);
-                    if let Some(x) = value {
-                        $ctx.tape.move_to($next_instr as usize);
-                        return x.into();
-                    }
-                    continue;
-                }
-                x => panic!("Invalid block hint: {x}"),
-            }
-        }
-    };
-}
-
 impl ImCompiler {
     pub fn new() -> Self {
         Self {
@@ -268,27 +173,14 @@ impl ImCompiler {
     pub fn compile_expr(&mut self, expr: Expr) {
         match expr {
             Expr::Boolean(b) => {
-                unsafe fn tr(_: &mut CallContext) -> Value {
-                    Value::Boolean(true)
-                }
-
-                unsafe fn fl(_: &mut CallContext) -> Value {
-                    Value::Boolean(false)
-                }
-
                 if b {
-                    self.push(unsafe { transmute(Operation(tr) as Operation<Value>) });
+                    self.push(unsafe { transmute(Operation(literals::tr) as Operation<Value>) });
                 } else {
-                    self.push(unsafe { transmute(Operation(fl) as Operation<Value>) });
+                    self.push(unsafe { transmute(Operation(literals::fl) as Operation<Value>) });
                 }
             }
             Expr::Float(x) => {
-                unsafe fn float(ctx: &mut CallContext) -> Value {
-                    //println!("float => _____");
-                    Value::Float(transmute(ctx.tape.get_next()))
-                }
-
-                self.push(unsafe { transmute(Operation(float) as Operation<Value>) });
+                self.push(unsafe { transmute(Operation(literals::float) as Operation<Value>) });
                 self.push(unsafe { transmute(x) });
             }
 
@@ -330,29 +222,6 @@ impl ImCompiler {
             }
 
             Expr::Block(statements) => {
-                unsafe fn block_checked(ctx: &mut CallContext) -> Value {
-                    let next_instr = ctx.tape.get_next() as usize;
-
-                    while ctx.tape.offset < next_instr {
-                        loop_body!(ctx, next_instr);
-
-                        let func = ctx.tape.get_next_func::<Value>();
-                        func.call(ctx);
-                    }
-
-                    Value::Nil
-                }
-
-                unsafe fn block(ctx: &mut CallContext) -> Value {
-                    let next_instr = ctx.tape.get_next() as usize;
-
-                    while ctx.tape.offset < next_instr {
-                        let func = ctx.tape.get_next_func::<Value>();
-                        func.call(ctx);
-                    }
-                    Value::Nil
-                }
-
                 let instr_idx = self.future_tape.len();
                 self.push(0);
                 // self.push(unsafe { transmute(Operation(block) as Operation<Value>) });
@@ -373,9 +242,9 @@ impl ImCompiler {
                 }
 
                 self.future_tape[instr_idx] = if has_return || has_while {
-                    unsafe { transmute(Operation(block_checked) as Operation<Value>) }
+                    unsafe { transmute(Operation(flow::block_checked) as Operation<Value>) }
                 } else {
-                    unsafe { transmute(Operation(block) as Operation<Value>) }
+                    unsafe { transmute(Operation(flow::block) as Operation<Value>) }
                 };
 
                 // Explicitely fetching the next instruction's index avoids
@@ -383,26 +252,12 @@ impl ImCompiler {
                 self.future_tape[next_instr] = self.future_tape.len() as u64;
             }
 
-            // TODO: Enable a return statement inside while
             Expr::While(cond, body) => {
-                unsafe fn l(ctx: &mut CallContext) -> Option<Value> {
-                    let next_idx: u64 = ctx.tape.get_next();
-                    let tape_ptr = ctx.tape.save();
-
-                    while ctx.tape.get_next_func::<Value>().call(ctx).truthy() {
-                        loop_body!(ctx, next_idx);
-
-                        ctx.tape.get_next_func::<Value>().call(ctx);
-                        ctx.tape.restore(tape_ptr);
-                    }
-
-                    ctx.tape.skip(next_idx as usize);
-
-                    None
-                }
-
                 self.push(Hint::While as u64);
-                self.push(unsafe { transmute(Operation(l) as Operation<Option<Value>>) });
+                self.push(unsafe {
+                    transmute(Operation(flow::while_loop) as Operation<Option<Value>>)
+                });
+
                 let next_instr = self.future_tape.len();
                 self.push(0);
 
@@ -414,19 +269,26 @@ impl ImCompiler {
                 self.future_tape[next_instr] = self.future_tape.len() as u64;
             }
 
-            Expr::BinaryOp(lhs, op, rhs) => match op {
-                Operator::Add => impl_op!(add, self, lhs, +, rhs),
-                Operator::Sub => impl_op!(sub, self, lhs, -, rhs),
-                Operator::Mul => impl_op!(mul, self, lhs, *, rhs),
-                Operator::Div => impl_op!(div, self, lhs, /, rhs),
-                Operator::Rem => impl_op!(rem, self, lhs, %, rhs),
-                Operator::Eq => impl_op!(eq, self, lhs, ==, rhs),
-                Operator::Neq => impl_op!(neq, self, lhs, !=, rhs),
-                Operator::Gt => impl_op!(gt, self, lhs, >, rhs),
-                Operator::Gte => impl_op!(gte, self, lhs, >=, rhs),
-                Operator::Lt => impl_op!(lt, self, lhs, <=, rhs),
-                Operator::Lte => impl_op!(lte, self, lhs, <, rhs),
-            },
+            Expr::BinaryOp(lhs, op, rhs) => {
+                let func = match op {
+                    Operator::Add => operations::native_op_add,
+                    Operator::Sub => operations::native_op_sub,
+                    Operator::Mul => operations::native_op_mul,
+                    Operator::Div => operations::native_op_div,
+                    Operator::Rem => operations::native_op_rem,
+                    Operator::Eq => operations::native_op_eq,
+                    Operator::Neq => operations::native_op_neq,
+                    Operator::Gt => operations::native_op_gt,
+                    Operator::Gte => operations::native_op_gte,
+                    Operator::Lt => operations::native_op_lt,
+                    Operator::Lte => operations::native_op_lte,
+                };
+
+                self.future_tape
+                    .push(unsafe { transmute(Operation(func) as Operation<Value>) });
+                self.compile_expr(*lhs);
+                self.compile_expr(*rhs);
+            }
 
             Expr::Add(_, _) => {}
         }
@@ -435,7 +297,7 @@ impl ImCompiler {
 
 #[derive(Debug, Clone)]
 pub struct CallContext {
-    tape: Tape,
+    pub tape: Tape,
     stack: Vec<Value>,
     globals: Vec<Value>,
 }
