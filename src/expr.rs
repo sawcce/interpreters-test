@@ -14,6 +14,7 @@ pub enum Expr {
     While(Box<Expr>, Box<Expr>),
     BinaryOp(Box<Expr>, Operator, Box<Expr>),
     Return(Box<Expr>),
+    Conditional(Box<(Expr, Expr)>, Vec<(Expr, Expr)>, Box<Expr>),
 }
 
 #[derive(Debug, Clone, Copy)]
