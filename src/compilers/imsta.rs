@@ -263,6 +263,21 @@ impl ImCompiler {
 
     pub fn compile_expr(&mut self, expr: Expr) {
         match expr {
+            Expr::Boolean(b) => {
+                unsafe fn tr(_: &mut CallContext) -> Value {
+                    Value::Boolean(true)
+                }
+
+                unsafe fn fl(_: &mut CallContext) -> Value {
+                    Value::Boolean(false)
+                }
+
+                if b {
+                    self.push(unsafe {transmute(Operation(tr) as Operation<Value>)});
+                } else {
+                    self.push(unsafe {transmute(Operation(fl) as Operation<Value>)});
+                }
+            },
             Expr::Float(x) => {
                 unsafe fn float(ctx: &mut CallContext) -> Value {
                     //println!("float => _____");
