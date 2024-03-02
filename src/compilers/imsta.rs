@@ -217,6 +217,7 @@ impl ImCompiler {
                 for statement in statements {
                     if let Expr::Return(_) = statement {
                         has_return = true;
+                        self.compile_expr(statement);
                         break;
                     } else if let Expr::While(_, _) = statement {
                         has_while = true;
