@@ -139,6 +139,11 @@ impl Tape {
         self.offset += amount;
     }
 
+    pub unsafe fn move_to(&mut self, dest: usize) {
+        let start = self.tape.sub(self.offset);
+        self.tape = start.add(dest);
+    }
+
     pub unsafe fn debug(&mut self) {
         let mut ptr = self.tape.sub(self.offset - 1).clone();
 
@@ -210,22 +215,21 @@ unsafe fn ret(ctx: &mut CallContext) -> Value {
 }
 
 macro_rules! loop_body {
-    ($ctx:ident, $length:ident) => {
+    ($ctx:ident, $next_instr:ident) => {
         if 1001 <= $ctx.tape.read() && $ctx.tape.read() <= 2000 as u64 {
             let v = $ctx.tape.read();
             $ctx.tape.skip(1);
-            println!("Test: {v}");
+
             match v {
                 1001 => {
                     let value = $ctx.tape.get_next_func::<Value>().call($ctx);
-                    $ctx.tape.skip($length as usize - 1);
+                    $ctx.tape.move_to($next_instr as usize);
                     return value.into();
                 }
                 1003 => {
                     let value = $ctx.tape.get_next_func::<Option<Value>>().call($ctx);
-                    println!("Value: {value:?}");
                     if let Some(x) = value {
-                        $ctx.tape.skip($length as usize - 1);
+                        $ctx.tape.move_to($next_instr as usize);
                         return x.into();
                     }
                     continue;
@@ -327,73 +331,64 @@ impl ImCompiler {
 
             Expr::Block(statements) => {
                 unsafe fn block(ctx: &mut CallContext) -> Value {
-                    let length = ctx.tape.get_next() as usize;
-                    let start = ctx.tape.offset;
-                    println!(
-                        "Block length {:?} {:?} => {}",
-                        length,
-                        ctx.tape,
-                        start + length
-                    );
+                    let next_instr = ctx.tape.get_next() as usize;
+                    println!("Block!");
 
-                    while ctx.tape.offset < start + length - 1 {
-                        loop_body!(ctx, length);
+
+                    while ctx.tape.offset < next_instr {
+                        loop_body!(ctx, next_instr);
 
                         let func = ctx.tape.get_next_func::<Value>();
                         func.call(ctx);
                     }
 
+                    println!("Ended block naturally!");
+
                     Value::Nil
                 }
 
                 self.push(unsafe { transmute(Operation(block) as Operation<Value>) });
-                let fix_idx = self.future_tape.len();
+                let next_instr = self.future_tape.len();
                 self.push(0);
 
                 for statement in statements {
-                    // Be sure to handle Return statements
                     self.compile_expr(statement);
                 }
 
-                self.future_tape[fix_idx] = (self.future_tape.len() - fix_idx) as u64;
+                // Explicitely fetching the next instruction's index avoids
+                // off by one errors
+                self.future_tape[next_instr] = self.future_tape.len() as u64;
             }
 
             // TODO: Enable a return statement inside while
             Expr::While(cond, body) => {
                 unsafe fn l(ctx: &mut CallContext) -> Option<Value> {
-                    println!("While");
-                    let size: u64 = ctx.tape.get_next();
+                    let next_idx: u64 = ctx.tape.get_next();
                     let tape_ptr = ctx.tape.save();
 
-                    let pk = ctx.tape.peek();
-                    println!("Peek {pk}");
                     while ctx.tape.get_next_func::<Value>().call(ctx).truthy() {
-                        loop_body!(ctx, size);
-                        // println!("Condition true {}", X.load(Ordering::Relaxed));
-                        X.fetch_add(1, Ordering::Relaxed);
+                        loop_body!(ctx, next_idx);
 
-                        // println!("Test!");
-                        // The body of the while loop must not return
-                        // any value
                         ctx.tape.get_next_func::<Value>().call(ctx);
                         ctx.tape.restore(tape_ptr);
                     }
 
-                    ctx.tape.skip(size as usize);
+                    ctx.tape.skip(next_idx as usize);
 
                     None
                 }
 
                 self.push(Hint::While as u64);
                 self.push(unsafe { transmute(Operation(l) as Operation<Option<Value>>) });
-                let size_idx = self.future_tape.len();
+                let next_instr = self.future_tape.len();
                 self.push(0);
 
                 self.compile_expr(*cond);
-                let body_idx = self.future_tape.len();
                 self.compile_expr(*body);
 
-                self.future_tape[size_idx] = (self.future_tape.len() - body_idx) as u64;
+                // Explicitely fetching the next instruction's index avoids
+                // off by one errors
+                self.future_tape[next_instr] = self.future_tape.len() as u64;
             }
 
             Expr::BinaryOp(lhs, op, rhs) => match op {
@@ -410,7 +405,7 @@ impl ImCompiler {
                 Operator::Lte => impl_op!(lte, self, lhs, <, rhs),
             },
 
-            _ => {}
+            Expr::Add(_, _) => {}
         }
     }
 }
@@ -434,6 +429,38 @@ impl CallContext {
     pub fn execute(&mut self) -> Value {
         unsafe { self.tape.get_next_func::<Value>().call(self) }
     }
+}
+
+#[test]
+pub fn nested() {
+    let prog = Expr::Block(vec![
+        Binding::Global("test".into())
+            .assign(Expr::Block(vec![
+                Expr::Return(Expr::Float(10.0).into()).into()
+            ]))
+            .into(),
+        Binding::Global("test2".into())
+            .assign(Expr::Block(vec![Expr::While(
+                Expr::Boolean(true).into(),
+                Expr::Return(Expr::Float(50.0).into()).into(),
+            )
+            .into()]))
+            .into(),
+    ]);
+
+    let mut compiler = ImCompiler::new();
+    compiler.compile_expr(prog);
+
+    println!("Compiler: {compiler:?}");
+
+    let mut context = CallContext::new(
+        compiler.future_tape.as_ptr(),
+        compiler.future_tape.len(),
+        compiler.globals.len(),
+    );
+    context.execute();
+
+    println!("End ctx: {context:?}");
 }
 
 #[test]
@@ -462,7 +489,7 @@ pub fn tape_test() {
     let mut compiler = ImCompiler::new();
     compiler.compile_expr(expr);
 
-    println!("Compiler: {compiler:?}");
+    // println!("Compiler: {compiler:?}");
 
     let mut context = CallContext::new(
         compiler.future_tape.as_ptr(),
@@ -471,8 +498,8 @@ pub fn tape_test() {
     );
     context.execute();
 
-    let x = X.load(Ordering::Relaxed);
-    println!("X: {x}");
+    // let x = X.load(Ordering::Relaxed);
+    // println!("X: {x}");
 
     //println!("Context: {:?}", context);
 }
