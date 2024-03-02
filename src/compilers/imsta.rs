@@ -277,11 +277,11 @@ impl ImCompiler {
                 }
 
                 if b {
-                    self.push(unsafe {transmute(Operation(tr) as Operation<Value>)});
+                    self.push(unsafe { transmute(Operation(tr) as Operation<Value>) });
                 } else {
-                    self.push(unsafe {transmute(Operation(fl) as Operation<Value>)});
+                    self.push(unsafe { transmute(Operation(fl) as Operation<Value>) });
                 }
-            },
+            }
             Expr::Float(x) => {
                 unsafe fn float(ctx: &mut CallContext) -> Value {
                     //println!("float => _____");
@@ -330,10 +330,8 @@ impl ImCompiler {
             }
 
             Expr::Block(statements) => {
-                unsafe fn block(ctx: &mut CallContext) -> Value {
+                unsafe fn block_checked(ctx: &mut CallContext) -> Value {
                     let next_instr = ctx.tape.get_next() as usize;
-                    println!("Block!");
-
 
                     while ctx.tape.offset < next_instr {
                         loop_body!(ctx, next_instr);
@@ -342,18 +340,43 @@ impl ImCompiler {
                         func.call(ctx);
                     }
 
-                    println!("Ended block naturally!");
-
                     Value::Nil
                 }
 
-                self.push(unsafe { transmute(Operation(block) as Operation<Value>) });
+                unsafe fn block(ctx: &mut CallContext) -> Value {
+                    let next_instr = ctx.tape.get_next() as usize;
+
+                    while ctx.tape.offset < next_instr {
+                        let func = ctx.tape.get_next_func::<Value>();
+                        func.call(ctx);
+                    }
+                    Value::Nil
+                }
+
+                let instr_idx = self.future_tape.len();
+                self.push(0);
+                // self.push(unsafe { transmute(Operation(block) as Operation<Value>) });
                 let next_instr = self.future_tape.len();
                 self.push(0);
 
+                let (mut has_return, mut has_while) = (false, false);
+
                 for statement in statements {
+                    if let Expr::Return(_) = statement {
+                        has_return = true;
+                        break;
+                    } else if let Expr::While(_, _) = statement {
+                        has_while = true;
+                    }
+
                     self.compile_expr(statement);
                 }
+
+                self.future_tape[instr_idx] = if has_return || has_while {
+                    unsafe { transmute(Operation(block_checked) as Operation<Value>) }
+                } else {
+                    unsafe { transmute(Operation(block) as Operation<Value>) }
+                };
 
                 // Explicitely fetching the next instruction's index avoids
                 // off by one errors
@@ -498,8 +521,5 @@ pub fn tape_test() {
     );
     context.execute();
 
-    // let x = X.load(Ordering::Relaxed);
-    // println!("X: {x}");
-
-    //println!("Context: {:?}", context);
+    assert_eq!(context.globals[0], Value::Float(0.0));
 }

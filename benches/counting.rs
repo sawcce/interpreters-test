@@ -12,7 +12,7 @@ fn count_native() {
 
 fn count_tape() {
     let expr = Expr::Block(vec![
-        Binding::Global("x".into()).assign(Expr::Float(100_000_000.0)),
+        Binding::Global("x".into()).assign(Expr::Float(10_000_000.0)),
         Expr::While(
             Expr::BinaryOp(
                 Expr::Var(Binding::Global("x".into())).into(),
@@ -33,16 +33,13 @@ fn count_tape() {
     let mut compiler = ImCompiler::new();
     compiler.compile_expr(expr);
 
-    //println!("Compiler: {compiler:?}");
-
     let mut context = CallContext::new(
         compiler.future_tape.as_ptr(),
         compiler.future_tape.len(),
         compiler.globals.len(),
     );
-    black_box(context.execute());
 
-    // println!("Context: {:?}", context);
+    black_box(context.execute());
 }
 
 fn criterion_benchmark(c: &mut Criterion) {
