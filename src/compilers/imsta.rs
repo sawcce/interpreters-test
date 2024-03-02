@@ -124,6 +124,7 @@ impl Tape {
 
     pub unsafe fn move_to(&mut self, dest: usize) {
         let start = self.tape.sub(self.offset);
+        self.offset = dest;
         self.tape = start.add(dest);
     }
 
