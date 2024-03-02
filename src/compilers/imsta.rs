@@ -358,7 +358,7 @@ pub fn tape_test() {
     let mut compiler = ImCompiler::new();
     compiler.compile_expr(expr);
 
-    Dissassembler::new(compiler.future_tape.clone()).dissassemble();
+    Dissassembler::from(compiler.clone()).dissassemble_program();
 
     // println!("Compiler: {compiler:?}");
 
