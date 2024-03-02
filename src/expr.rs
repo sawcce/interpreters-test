@@ -50,15 +50,7 @@ impl Expr {
         Expr::Add(Box::new(self), rhs.into())
     }
 
-    pub fn returns_value(&self) -> bool {
-        match self {
-            Expr::Add(_, _)
-            | Expr::Var(_)
-            | Expr::BinaryOp(_, _, _)
-            | Expr::Float(_)
-            | Expr::Boolean(_)
-            | Expr::Block(_) => true,
-            Expr::Assign(_, _) | Expr::While(_, _) | Expr::Return(_) => false,
-        }
+    pub fn op(self, operator: Operator, rhs: impl Into<Box<Expr>>) -> Self {
+        Expr::BinaryOp(self.into(), operator, rhs.into())
     }
 }
