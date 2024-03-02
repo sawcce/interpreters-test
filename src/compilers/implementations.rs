@@ -81,6 +81,25 @@ pub mod flow {
 
         None
     }
+
+    pub unsafe fn conditional(ctx: &mut CallContext) -> Value {
+        let branch_amount = ctx.tape.get_next();
+        let end_jmp = ctx.tape.get_next();
+
+        for _ in 0..branch_amount {
+            let if_false_jmp = ctx.tape.get_next();
+            let res = ctx.tape.get_next_func::<Value>().call(ctx).truthy();
+
+            if res {
+                let value = ctx.tape.get_next_func::<Value>().call(ctx);
+                ctx.tape.move_to(end_jmp as usize);
+                return value;
+            }
+            ctx.tape.move_to(if_false_jmp as usize);
+        }
+
+        return ctx.tape.get_next_func::<Value>().call(ctx);
+    }
 }
 
 pub mod operations {

@@ -200,7 +200,9 @@ impl ImCompiler {
 
             Expr::Assign(binding, value) => match binding {
                 Binding::Global(name) => {
-                    self.push(unsafe { transmute(Operation(operations::assign) as Operation<Value>) });
+                    self.push(unsafe {
+                        transmute(Operation(operations::assign) as Operation<Value>)
+                    });
                     let idx = self.constant_get_or_def(name);
                     self.push(idx as u64);
                     self.compile_expr(*value);
@@ -261,6 +263,32 @@ impl ImCompiler {
                 self.future_tape[next_instr] = self.future_tape.len() as u64;
             }
 
+            Expr::Conditional(true_t, elifs, else_body) => {
+                self.push(unsafe { transmute(Operation(flow::conditional) as Operation<Value>) });
+                let (true_cond, true_body) = *true_t;
+                self.push(1 + elifs.len() as u64);
+                let end_fix_idx = self.future_tape.len();
+                self.push(0);
+
+                let mut false_fix_idx = self.future_tape.len();
+                self.push(0);
+                self.compile_expr(true_cond);
+                self.compile_expr(true_body);
+
+                for (cond, body) in elifs {
+                    self.future_tape[false_fix_idx] = self.future_tape.len() as u64;
+                    false_fix_idx = self.future_tape.len();
+                    self.push(0);
+                    self.compile_expr(cond);
+                    self.compile_expr(body);
+                }
+
+                self.future_tape[false_fix_idx] = self.future_tape.len() as u64;
+                self.compile_expr(*else_body);
+
+                self.future_tape[end_fix_idx] = self.future_tape.len() as u64;
+            }
+
             Expr::BinaryOp(lhs, op, rhs) => {
                 let func = match op {
                     Operator::Add => operations::native_op_add,
@@ -306,6 +334,50 @@ impl CallContext {
     pub fn execute(&mut self) -> Value {
         unsafe { self.tape.get_next_func::<Value>().call(self) }
     }
+}
+
+// TODO: (currently) Doesn't ensure that the vector doesn't get dropped!
+impl From<ImCompiler> for CallContext {
+    fn from(compiler: ImCompiler) -> Self {
+        Self::new(
+            compiler.future_tape.as_ptr(),
+            compiler.future_tape.len(),
+            compiler.globals.len(),
+        )
+    }
+}
+
+#[test]
+pub fn awfully_nested() {
+    let program = Expr::Block(vec![Expr::Return(
+        Expr::Block(vec![Expr::Return(
+            Expr::Block(vec![Expr::Return(
+                Expr::Block(vec![Expr::Return(Expr::Float(10.0).into()).into()])
+                    .op(Operator::Add, Expr::Float(10.0))
+                    .into(),
+            )])
+            .op(Operator::Mul, Expr::Float(80.0))
+            .into(),
+        )
+        .into()])
+        .op(Operator::Gt, Expr::Float(100.0))
+        .into(),
+    )
+    .into()]);
+
+    let mut compiler = ImCompiler::new();
+    compiler.compile_expr(program);
+
+    Dissassembler::from(compiler.clone()).dissassemble_program();
+
+    let mut context = CallContext::new(
+        compiler.future_tape.as_ptr(),
+        compiler.future_tape.len(),
+        compiler.globals.len(),
+    );
+
+    let v = context.execute();
+    println!("{v:?}");
 }
 
 #[test]
@@ -380,4 +452,34 @@ pub fn tape_test() {
     context.execute();
 
     assert_eq!(context.globals[0], Value::Float(0.0));
+}
+
+#[test]
+pub fn conditional() {
+    let program = Expr::Conditional(
+        (Expr::Boolean(false), Expr::Float(10.0)).into(),
+        vec![
+            (Expr::Boolean(false), Expr::Float(9.0)),
+            (Expr::Boolean(false), Expr::Float(8.0)),
+            (Expr::Boolean(true), Expr::Float(7.0)),
+            (Expr::Boolean(false), Expr::Float(3.0)),
+        ],
+        Expr::Float(5.0).into(),
+    );
+
+    let mut compiler = ImCompiler::new();
+    compiler.compile_expr(program);
+    println!("Compiler: {compiler:?}");
+
+    let mut context = CallContext::new(
+        compiler.future_tape.as_ptr(),
+        compiler.future_tape.len(),
+        compiler.globals.len(),
+    );
+
+    let end_value = context.execute();
+
+    println!("Value: {end_value:?}");
+
+    // assert_eq!(end_value, Value::Float(10.0));
 }
