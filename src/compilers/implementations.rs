@@ -83,7 +83,7 @@ pub mod flow {
         None
     }
 
-    pub unsafe fn conditional(ctx: &mut CallContext) -> Value {
+    pub unsafe fn conditional(ctx: &mut CallContext) -> (bool, Value) {
         let branch_amount = ctx.tape.get_next();
         let end_jmp = ctx.tape.get_next();
 
@@ -94,12 +94,12 @@ pub mod flow {
             if res {
                 let value = ctx.tape.get_next_func::<Value>().call(ctx);
                 ctx.tape.move_to(end_jmp as usize);
-                return value;
+                return (false, value);
             }
             ctx.tape.move_to(if_false_jmp as usize);
         }
 
-        return ctx.tape.get_next_func::<Value>().call(ctx);
+        return (false, ctx.tape.get_next_func::<Value>().call(ctx));
     }
 }
 
